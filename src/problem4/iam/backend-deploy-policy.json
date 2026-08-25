@@ -1,0 +1,54 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PushPullBackendImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload"
+      ],
+      "Resource": "arn:aws:ecr:<REGION>:<ACCOUNT_ID>:repository/<ECR_REPOSITORY>"
+    },
+    {
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DeployViaSsm",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": [
+        "arn:aws:ssm:<REGION>::document/AWS-RunShellScript",
+        "arn:aws:ec2:<REGION>:<ACCOUNT_ID>:instance/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/Application": "backend"
+        }
+      }
+    },
+    {
+      "Sid": "ReadInstanceMetadataForRollback",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/Application": "backend"
+        }
+      }
+    }
+  ]
+}

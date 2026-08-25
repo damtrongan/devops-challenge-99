@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SyncStaticSite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::<S3_BUCKET_NAME>"
+    },
+    {
+      "Sid": "WriteStaticAssets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::<S3_BUCKET_NAME>/*"
+    },
+    {
+      "Sid": "InvalidateCdnCache",
+      "Effect": "Allow",
+      "Action": "cloudfront:CreateInvalidation",
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<CLOUDFRONT_DISTRIBUTION_ID>"
+    }
+  ]
+}

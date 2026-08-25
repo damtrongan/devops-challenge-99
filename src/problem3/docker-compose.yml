@@ -1,0 +1,51 @@
+services:
+  nginx:
+    image: nginx:1.25
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
+
+  api:
+    build: ./api
+    environment:
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/status', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: on-failure
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: on-failure
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: on-failure

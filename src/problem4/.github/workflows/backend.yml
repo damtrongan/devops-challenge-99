@@ -1,0 +1,184 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+  release:
+    types: [published]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: backend-deploy-${{ github.ref }}
+  cancel-in-progress: false # never cancel a deploy mid-flight
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+jobs:
+  test:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test -- --ci
+      - run: npm run build --if-present
+
+  security-scan:
+    needs: test
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      # Fails the pipeline on known high/critical vulnerabilities. A real
+      # production setup would likely add Trivy/Snyk for the built image too.
+      - run: npm audit --audit-level=high
+
+  build-and-push:
+    needs: [test, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - name: Build and push image
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          docker build -t "$IMAGE:${{ steps.meta.outputs.tag }}" -t "$IMAGE:latest" .
+          docker push "$IMAGE:${{ steps.meta.outputs.tag }}"
+          docker push "$IMAGE:latest"
+
+  deploy-staging:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging-api.example.com/status
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve ECR registry
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy image to staging EC2 fleet via SSM
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          ./scripts/deploy-backend.sh "${{ needs.build-and-push.outputs.image_tag }}" "${{ vars.STAGING_INSTANCE_TAG }}"
+
+      - name: Health check
+        run: ./scripts/healthcheck.sh "https://staging-api.example.com/status" 10 6
+
+  # Deploys are promoted, not rebuilt: a GitHub Release published against a
+  # commit on main deploys the *already-built* image for that commit's SHA
+  # (built by the push-to-main run above). This guarantees staging and
+  # production run byte-identical artifacts.
+  deploy-production:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.example.com/status
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.target_commitish }}
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve ECR registry
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Capture currently running tag (rollback target)
+        id: previous
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: ./scripts/get-current-tag.sh "${{ vars.PRODUCTION_INSTANCE_TAG }}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy image to production EC2 fleet via SSM
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          ./scripts/deploy-backend.sh "${{ steps.meta.outputs.tag }}" "${{ vars.PRODUCTION_INSTANCE_TAG }}"
+
+      - name: Health check
+        id: health
+        run: ./scripts/healthcheck.sh "https://api.example.com/status" 10 6
+
+      - name: Roll back on failed deploy or health check
+        if: failure()
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          echo "Deploy or health check failed, rolling back to ${{ steps.previous.outputs.tag }}"
+          ./scripts/deploy-backend.sh "${{ steps.previous.outputs.tag }}" "${{ vars.PRODUCTION_INSTANCE_TAG }}"
